@@ -98,7 +98,7 @@ static void ComputeFrameWorldMatrix(IDirect3DRMFrame* frame, D3DRMMATRIX4D out)
 	memcpy(out, acc, sizeof(acc));
 }
 
-HRESULT Direct3DRMViewport_SDL3GPUImpl::CollectSceneData(IDirect3DRMFrame* group)
+HRESULT Direct3DRMViewport_SDL3GPUImpl::CollectSceneData()
 {
 	MINIWIN_NOT_IMPLEMENTED(); // Lights, camera, textures, materials
 
@@ -199,7 +199,7 @@ HRESULT Direct3DRMViewport_SDL3GPUImpl::CollectSceneData(IDirect3DRMFrame* group
 
 	D3DRMMATRIX4D identity = {{1.f, 0.f, 0.f, 0.f}, {0.f, 1.f, 0.f, 0.f}, {0.f, 0.f, 1.f, 0.f}, {0.f, 0.f, 0.f, 1.f}};
 
-	recurseFrame(group, identity);
+	recurseFrame(m_rootFrame, identity);
 
 	PushVertices(verts.data(), verts.size());
 
@@ -257,13 +257,14 @@ void Direct3DRMViewport_SDL3GPUImpl::PushVertices(const PositionColorVertex* ver
 	SDL_ReleaseGPUTransferBuffer(m_device, transferBuffer);
 }
 
-HRESULT Direct3DRMViewport_SDL3GPUImpl::Render(IDirect3DRMFrame* group)
+HRESULT Direct3DRMViewport_SDL3GPUImpl::Render(IDirect3DRMFrame* rootFrame)
 {
 	if (!m_device) {
 		return DDERR_GENERIC;
 	}
 
-	HRESULT success = CollectSceneData(group);
+	m_rootFrame = rootFrame;
+	HRESULT success = CollectSceneData();
 	if (success != DD_OK) {
 		return success;
 	}
@@ -468,10 +469,286 @@ HRESULT Direct3DRMViewport_SDL3GPUImpl::InverseTransform(D3DVECTOR* world, D3DRM
 	return DD_OK;
 }
 
+D3DVECTOR TransformPoint(const D3DRMMATRIX4D& mat, const D3DVECTOR& v)
+{
+	return {
+		v.x * mat[0][0] + v.y * mat[1][0] + v.z * mat[2][0] + mat[3][0],
+		v.x * mat[0][1] + v.y * mat[1][1] + v.z * mat[2][1] + mat[3][1],
+		v.x * mat[0][2] + v.y * mat[1][2] + v.z * mat[2][2] + mat[3][2],
+	};
+}
+
+bool RayIntersectsBox(
+	const D3DVECTOR& origin,
+	const D3DVECTOR& dir,
+	const D3DRMBOX& box,
+	const D3DRMMATRIX4D& matrix,
+	float& outT
+)
+{
+	// Transform box corners
+	D3DVECTOR min = TransformPoint(matrix, box.min);
+	D3DVECTOR max = TransformPoint(matrix, box.max);
+
+	// AABB-ray intersection (simplified slab test)
+	float tmin = (min.x - origin.x) / dir.x;
+	float tmax = (max.x - origin.x) / dir.x;
+	if (tmin > tmax) {
+		std::swap(tmin, tmax);
+	}
+
+	float tymin = (min.y - origin.y) / dir.y;
+	float tymax = (max.y - origin.y) / dir.y;
+	if (tymin > tymax) {
+		std::swap(tymin, tymax);
+	}
+
+	if ((tmin > tymax) || (tymin > tmax)) {
+		return false;
+	}
+	if (tymin > tmin) {
+		tmin = tymin;
+	}
+	if (tymax < tmax) {
+		tmax = tymax;
+	}
+
+	float tzmin = (min.z - origin.z) / dir.z;
+	float tzmax = (max.z - origin.z) / dir.z;
+	if (tzmin > tzmax) {
+		std::swap(tzmin, tzmax);
+	}
+
+	if ((tmin > tzmax) || (tzmin > tmax)) {
+		return false;
+	}
+	if (tzmin > tmin) {
+		tmin = tzmin;
+	}
+	if (tzmax < tmax) {
+		tmax = tzmax;
+	}
+
+	outT = tmin;
+	return true;
+}
+
+void Normalize(D3DVECTOR& v)
+{
+	float len = SDL_sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
+	if (len > 0.0f) {
+		v.x /= len;
+		v.y /= len;
+		v.z /= len;
+	}
+}
+
+IDirect3DRMFrameArray* CreateFrameArrayFrom(IDirect3DRMFrame* frame)
+{
+	auto* arr = new Direct3DRMFrameArray_SDL3GPUImpl();
+	arr->AddElement(frame);
+	return arr;
+}
+
+bool D3DRMMatrixInvert(D3DRMMATRIX4D out, const D3DRMMATRIX4D in)
+{
+	float inv[16], det;
+	float m[16];
+
+	// Flatten matrix
+	for (int i = 0; i < 4; ++i) {
+		for (int j = 0; j < 4; ++j) {
+			m[i * 4 + j] = in[j][i]; // transpose for column-major to row-major
+		}
+	}
+
+	inv[0] = m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15] + m[9] * m[7] * m[14] +
+			 m[13] * m[6] * m[11] - m[13] * m[7] * m[10];
+
+	inv[4] = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15] - m[8] * m[7] * m[14] -
+			 m[12] * m[6] * m[11] + m[12] * m[7] * m[10];
+
+	inv[8] = m[4] * m[9] * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15] + m[8] * m[7] * m[13] +
+			 m[12] * m[5] * m[11] - m[12] * m[7] * m[9];
+
+	inv[12] = -m[4] * m[9] * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14] - m[8] * m[6] * m[13] -
+			  m[12] * m[5] * m[10] + m[12] * m[6] * m[9];
+
+	inv[1] = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15] - m[9] * m[3] * m[14] -
+			 m[13] * m[2] * m[11] + m[13] * m[3] * m[10];
+
+	inv[5] = m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15] + m[8] * m[3] * m[14] +
+			 m[12] * m[2] * m[11] - m[12] * m[3] * m[10];
+
+	inv[9] = -m[0] * m[9] * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15] - m[8] * m[3] * m[13] -
+			 m[12] * m[1] * m[11] + m[12] * m[3] * m[9];
+
+	inv[13] = m[0] * m[9] * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14] + m[8] * m[2] * m[13] +
+			  m[12] * m[1] * m[10] - m[12] * m[2] * m[9];
+
+	inv[2] = m[1] * m[6] * m[15] - m[1] * m[7] * m[14] - m[5] * m[2] * m[15] + m[5] * m[3] * m[14] +
+			 m[13] * m[2] * m[7] - m[13] * m[3] * m[6];
+
+	inv[6] = -m[0] * m[6] * m[15] + m[0] * m[7] * m[14] + m[4] * m[2] * m[15] - m[4] * m[3] * m[14] -
+			 m[12] * m[2] * m[7] + m[12] * m[3] * m[6];
+
+	inv[10] = m[0] * m[5] * m[15] - m[0] * m[7] * m[13] - m[4] * m[1] * m[15] + m[4] * m[3] * m[13] +
+			  m[12] * m[1] * m[7] - m[12] * m[3] * m[5];
+
+	inv[14] = -m[0] * m[5] * m[14] + m[0] * m[6] * m[13] + m[4] * m[1] * m[14] - m[4] * m[2] * m[13] -
+			  m[12] * m[1] * m[6] + m[12] * m[2] * m[5];
+
+	inv[3] = -m[1] * m[6] * m[11] + m[1] * m[7] * m[10] + m[5] * m[2] * m[11] - m[5] * m[3] * m[10] -
+			 m[9] * m[2] * m[7] + m[9] * m[3] * m[6];
+
+	inv[7] = m[0] * m[6] * m[11] - m[0] * m[7] * m[10] - m[4] * m[2] * m[11] + m[4] * m[3] * m[10] +
+			 m[8] * m[2] * m[7] - m[8] * m[3] * m[6];
+
+	inv[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11] - m[4] * m[3] * m[9] -
+			  m[8] * m[1] * m[7] + m[8] * m[3] * m[5];
+
+	inv[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10] + m[4] * m[2] * m[9] + m[8] * m[1] * m[6] -
+			  m[8] * m[2] * m[5];
+
+	det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12];
+
+	if (det == 0.0f) {
+		return false;
+	}
+
+	det = 1.0f / det;
+
+	for (int i = 0; i < 16; i++) {
+		inv[i] *= det;
+	}
+
+	// Store back to D3DRMMATRIX4D (column-major)
+	for (int i = 0; i < 4; ++i) {
+		for (int j = 0; j < 4; ++j) {
+			out[j][i] = inv[i * 4 + j];
+		}
+	}
+
+	return true;
+}
+
 HRESULT Direct3DRMViewport_SDL3GPUImpl::Pick(float x, float y, LPDIRECT3DRMPICKEDARRAY* pickedArray)
 {
-	MINIWIN_NOT_IMPLEMENTED();
-	return DD_OK;
+	struct Hit {
+		PickRecord record;
+		float distance;
+	};
+
+	std::vector<Hit> hits;
+
+	// Step 1: Generate the ray in world space
+	D3DRMMATRIX4D cameraWorld;
+	ComputeFrameWorldMatrix(m_camera, cameraWorld);
+
+	D3DVECTOR camPos = {cameraWorld[3][0], cameraWorld[3][1], cameraWorld[3][2]};
+
+	// Convert screen (x,y) to normalized device coordinates
+	float ndcX = (2.0f * x / m_width - 1.0f);
+	float ndcY = (1.0f - 2.0f * y / m_height);
+
+	// Get the inverse projection matrix
+	D3DRMMATRIX4D projMatrix;
+	CalculateProjectionMatrix(projMatrix, m_field, float(m_width) / float(m_height), m_front, m_back);
+
+	D3DRMMATRIX4D invProj;
+	D3DRMMatrixInvert(invProj, projMatrix);
+
+	// Unproject the point (ndcX, ndcY, -1) to get the ray direction
+	D3DVECTOR rayDir = {
+		ndcX * invProj[0][0] + ndcY * invProj[1][0] + invProj[2][0],
+		ndcX * invProj[0][1] + ndcY * invProj[1][1] + invProj[2][1],
+		ndcX * invProj[0][2] + ndcY * invProj[1][2] + invProj[2][2],
+	};
+
+	Normalize(rayDir);
+
+	std::function<void(IDirect3DRMFrame*, D3DRMMATRIX4D)> recurse;
+	recurse = [&](IDirect3DRMFrame* frame, D3DRMMATRIX4D parentMatrix) {
+		Direct3DRMFrame_SDL3GPUImpl* frameImpl = static_cast<Direct3DRMFrame_SDL3GPUImpl*>(frame);
+		D3DRMMATRIX4D localMatrix;
+		memcpy(localMatrix, frameImpl->m_transform, sizeof(D3DRMMATRIX4D));
+
+		D3DRMMATRIX4D worldMatrix;
+		D3DRMMatrixMultiply(worldMatrix, parentMatrix, localMatrix);
+
+		IDirect3DRMVisualArray* visuals = nullptr;
+		if (frame->GetVisuals(&visuals) != D3DRM_OK || !visuals) {
+			return;
+		}
+
+		DWORD count = visuals->GetSize();
+		for (DWORD i = 0; i < count; ++i) {
+			IDirect3DRMVisual* vis = nullptr;
+			visuals->GetElement(i, &vis);
+			if (!vis) {
+				continue;
+			}
+
+			IDirect3DRMMesh* mesh = nullptr;
+			if (SUCCEEDED(vis->QueryInterface(IID_IDirect3DRMMesh, (void**) &mesh)) && mesh) {
+				// Get bounding box and transform it
+				D3DRMBOX box;
+				if (SUCCEEDED(mesh->GetBox(&box))) {
+					D3DVECTOR boxCenter = {
+						(box.min.x + box.max.x) * 0.5f,
+						(box.min.y + box.max.y) * 0.5f,
+						(box.min.z + box.max.z) * 0.5f,
+					};
+
+					D3DVECTOR worldBoxCenter = TransformPoint(worldMatrix, boxCenter);
+
+					float t = 0.0f;
+					if (RayIntersectsBox(camPos, rayDir, box, worldMatrix, t)) {
+						// Store hit
+						PickRecord rec;
+						rec.visual = vis;
+						rec.frameArray = CreateFrameArrayFrom(frame);
+						hits.push_back({rec, t});
+					}
+				}
+				mesh->Release();
+			}
+			vis->Release();
+		}
+
+		visuals->Release();
+
+		// Recurse into children
+		IDirect3DRMFrameArray* children = nullptr;
+		if (SUCCEEDED(frame->GetChildren(&children)) && children) {
+			DWORD childCount = children->GetSize();
+			for (DWORD i = 0; i < childCount; ++i) {
+				IDirect3DRMFrame* child = nullptr;
+				if (SUCCEEDED(children->GetElement(i, &child)) && child) {
+					recurse(child, worldMatrix);
+					child->Release();
+				}
+			}
+			children->Release();
+		}
+	};
+
+	D3DRMMATRIX4D identity = {{1.f, 0.f, 0.f, 0.f}, {0.f, 1.f, 0.f, 0.f}, {0.f, 0.f, 1.f, 0.f}, {0.f, 0.f, 0.f, 1.f}};
+
+	recurse(m_rootFrame, identity);
+
+	// Sort by distance
+	std::sort(hits.begin(), hits.end(), [](const Hit& a, const Hit& b) { return a.distance < b.distance; });
+
+	// Construct picked array
+	std::vector<PickRecord> final;
+	for (auto& h : hits) {
+		final.push_back(h.record);
+	}
+
+	*pickedArray = new Direct3DRMPickedArray_SDL3GPUImpl(final.data(), final.size());
+
+	return D3DRM_OK;
 }
 
 void Direct3DRMViewport_SDL3GPUImpl::CloseDevice()
