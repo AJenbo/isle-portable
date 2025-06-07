@@ -232,7 +232,7 @@ Direct3DRMSDL3GPURenderer::Direct3DRMSDL3GPURenderer(
 
 Direct3DRMSDL3GPURenderer::~Direct3DRMSDL3GPURenderer()
 {
-    SDL_DestroySurface(m_renderedImage);
+	SDL_DestroySurface(m_renderedImage);
 	SDL_ReleaseGPUSampler(m_device, m_sampler);
 	SDL_ReleaseGPUBuffer(m_device, m_vertexBuffer);
 	SDL_ReleaseGPUTransferBuffer(m_device, m_downloadTransferBuffer);
