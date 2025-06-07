@@ -264,10 +264,11 @@ SDL_GPUTexture* Direct3DRMSDL3GPURenderer::CreateTextureFromSurface(SDL_Surface*
 {
 	SDL_Surface* surf = SDL_ConvertSurface(surface, SDL_PIXELFORMAT_ABGR8888);
 	if (!surf) {
+		SDL_LogError(LOG_CATEGORY_MINIWIN, "SDL_ConvertSurface (%s)", SDL_GetError());
 		return nullptr;
 	}
 
-	const Uint32 dataSize = surf->w * surf->h * 4;
+	const Uint32 dataSize = surf->pitch * surf->h;
 
 	SDL_GPUTextureCreateInfo textureInfo = {};
 	textureInfo.type = SDL_GPU_TEXTURETYPE_2D;
@@ -281,17 +282,23 @@ SDL_GPUTexture* Direct3DRMSDL3GPURenderer::CreateTextureFromSurface(SDL_Surface*
 	SDL_GPUTexture* texture = SDL_CreateGPUTexture(m_device, &textureInfo);
 
 	if (!texture) {
+		SDL_LogError(LOG_CATEGORY_MINIWIN, "SDL_CreateGPUTexture (%s)", SDL_GetError());
 		SDL_DestroySurface(surf);
 		return nullptr;
 	}
 
-	SDL_GPUTransferBufferCreateInfo transferInfo;
+	SDL_GPUTransferBufferCreateInfo transferInfo = {};
 	transferInfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
 	transferInfo.size = dataSize;
 	SDL_GPUTransferBuffer* transferBuffer = SDL_CreateGPUTransferBuffer(m_device, &transferInfo);
+	if (!transferBuffer) {
+		SDL_LogError(LOG_CATEGORY_MINIWIN, "SDL_ConvertSurface (%s)", SDL_GetError());
+		return nullptr;
+	}
 
 	void* transferData = SDL_MapGPUTransferBuffer(m_device, transferBuffer, false);
 	if (!transferData) {
+		SDL_LogError(LOG_CATEGORY_MINIWIN, "SDL_MapGPUTransferBuffer (%s)", SDL_GetError());
 		SDL_ReleaseGPUTexture(m_device, texture);
 		SDL_DestroySurface(surf);
 		return nullptr;
@@ -300,13 +307,13 @@ SDL_GPUTexture* Direct3DRMSDL3GPURenderer::CreateTextureFromSurface(SDL_Surface*
 	memcpy(transferData, surf->pixels, dataSize);
 	SDL_UnmapGPUTransferBuffer(m_device, transferBuffer);
 
-	SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(m_device);
-	SDL_GPUCopyPass* pass = SDL_BeginGPUCopyPass(cmd);
+	SDL_GPUCommandBuffer* cmdbuf = SDL_AcquireGPUCommandBuffer(m_device);
+	SDL_GPUCopyPass* pass = SDL_BeginGPUCopyPass(cmdbuf);
 
-	SDL_GPUTextureTransferInfo transferRegionInfo;
+	SDL_GPUTextureTransferInfo transferRegionInfo = {};
 	transferRegionInfo.transfer_buffer = transferBuffer;
 	transferRegionInfo.offset = 0;
-	SDL_GPUTextureRegion textureRegion;
+	SDL_GPUTextureRegion textureRegion = {};
 	textureRegion.texture = texture;
 	textureRegion.mip_level = 0;
 	textureRegion.layer = 0;
@@ -319,7 +326,11 @@ SDL_GPUTexture* Direct3DRMSDL3GPURenderer::CreateTextureFromSurface(SDL_Surface*
 	SDL_UploadToGPUTexture(pass, &transferRegionInfo, &textureRegion, false);
 
 	SDL_EndGPUCopyPass(pass);
-	SDL_SubmitGPUCommandBuffer(cmd);
+	SDL_GPUFence* fence = SDL_SubmitGPUCommandBufferAndAcquireFence(cmdbuf);
+	if (!SDL_WaitForGPUFences(m_device, true, &fence, 1)) {
+		SDL_LogError(LOG_CATEGORY_MINIWIN, "SDL_MapGPUTransferBuffer (%s)", SDL_GetError());
+	}
+	SDL_ReleaseGPUFence(m_device, fence);
 
 	SDL_ReleaseGPUTransferBuffer(m_device, transferBuffer);
 	SDL_DestroySurface(surf);
@@ -440,10 +451,11 @@ HRESULT Direct3DRMSDL3GPURenderer::BeginFrame(const D3DRMMATRIX4D& viewMatrix)
 	SDL_GPURenderPass* renderPass = SDL_BeginGPURenderPass(cmdbuf, &colorTargetInfo, 1, &depthStencilTargetInfo);
 	SDL_EndGPURenderPass(renderPass);
 
-	if (!SDL_SubmitGPUCommandBuffer(cmdbuf)) {
-		SDL_LogError(LOG_CATEGORY_MINIWIN, "SDL_SubmitGPUCommandBuffer failed (%s)", SDL_GetError());
-		return DDERR_GENERIC;
+	SDL_GPUFence* fence = SDL_SubmitGPUCommandBufferAndAcquireFence(cmdbuf);
+	if (!SDL_WaitForGPUFences(m_device, true, &fence, 1)) {
+		SDL_LogError(LOG_CATEGORY_MINIWIN, "SDL_MapGPUTransferBuffer (%s)", SDL_GetError());
 	}
+	SDL_ReleaseGPUFence(m_device, fence);
 
 	return DD_OK;
 }
@@ -575,9 +587,11 @@ void Direct3DRMSDL3GPURenderer::SubmitDraw(
 
 	SDL_EndGPURenderPass(renderPass);
 
-	if (!SDL_SubmitGPUCommandBuffer(cmdbuf)) {
-		SDL_LogError(LOG_CATEGORY_MINIWIN, "SDL_SubmitGPUCommandBuffer failes (%s)", SDL_GetError());
+	SDL_GPUFence* fence = SDL_SubmitGPUCommandBufferAndAcquireFence(cmdbuf);
+	if (!SDL_WaitForGPUFences(m_device, true, &fence, 1)) {
+		SDL_LogError(LOG_CATEGORY_MINIWIN, "SDL_MapGPUTransferBuffer (%s)", SDL_GetError());
 	}
+	SDL_ReleaseGPUFence(m_device, fence);
 }
 
 HRESULT Direct3DRMSDL3GPURenderer::FinalizeFrame()
