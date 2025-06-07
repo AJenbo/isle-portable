@@ -1,5 +1,11 @@
 #include "Common.hlsl"
 
+struct FS_Output
+{
+    float4 Color : SV_Target0;
+    float  Depth : SV_Depth;
+};
+
 cbuffer FragmentShadingData : register(b0, space3)
 {
 	SceneLight lights[3];
