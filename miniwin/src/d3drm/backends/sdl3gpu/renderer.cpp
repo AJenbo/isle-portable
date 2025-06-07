@@ -203,10 +203,10 @@ Direct3DRMSDL3GPURenderer::Direct3DRMSDL3GPURenderer(
 	SDL_GPUSamplerCreateInfo samplerInfo = {};
 	samplerInfo.min_filter = SDL_GPU_FILTER_LINEAR;
 	samplerInfo.mag_filter = SDL_GPU_FILTER_LINEAR;
-	samplerInfo.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
-	samplerInfo.address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
-	samplerInfo.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
-	samplerInfo.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+	samplerInfo.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_LINEAR;
+	samplerInfo.address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_REPEAT;
+	samplerInfo.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_REPEAT;
+	samplerInfo.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_REPEAT;
 	m_sampler = SDL_CreateGPUSampler(m_device, &samplerInfo);
 	if (!m_sampler) {
 		SDL_Log("%s", SDL_GetError());
@@ -309,6 +309,12 @@ SDL_GPUTexture* Direct3DRMSDL3GPURenderer::CreateTextureFromSurface(SDL_Surface*
 	SDL_UnmapGPUTransferBuffer(m_device, transferBuffer);
 
 	SDL_GPUCommandBuffer* cmdbuf = SDL_AcquireGPUCommandBuffer(m_device);
+	if (!cmdbuf) {
+		SDL_LogError(LOG_CATEGORY_MINIWIN, "SDL_AcquireGPUCommandBuffer (%s)", SDL_GetError());
+		SDL_ReleaseGPUTexture(m_device, texture);
+		SDL_DestroySurface(surf);
+		return nullptr;
+	}
 	SDL_GPUCopyPass* pass = SDL_BeginGPUCopyPass(cmdbuf);
 
 	SDL_GPUTextureTransferInfo transferRegionInfo = {};
@@ -372,6 +378,9 @@ Uint32 Direct3DRMSDL3GPURenderer::GetTextureId(IDirect3DRMTexture* iTexture)
 			if (tex.version != texture->m_version) {
 				SDL_ReleaseGPUTexture(m_device, tex.gpuTexture);
 				tex.gpuTexture = CreateTextureFromSurface(surface->m_surface);
+				if (!tex.gpuTexture) {
+					return NO_TEXTURE_ID;
+				}
 				tex.version = texture->m_version;
 			}
 			return i;
@@ -510,6 +519,7 @@ void Direct3DRMSDL3GPURenderer::SubmitDraw(
 	GeometryVertex* transferData = (GeometryVertex*) SDL_MapGPUTransferBuffer(m_device, transferBuffer, false);
 	if (!transferData) {
 		SDL_LogError(LOG_CATEGORY_MINIWIN, "SDL_MapGPUTransferBuffer returned NULL buffer (%s)", SDL_GetError());
+		return;
 	}
 
 	memcpy(transferData, vertices, m_vertexCount * sizeof(GeometryVertex));
@@ -561,7 +571,7 @@ void Direct3DRMSDL3GPURenderer::SubmitDraw(
 			SDL_BindGPUFragmentSamplers(renderPass, 0, &samplerBinding, 1);
 		}
 		else {
-			SDL_LogError(LOG_CATEGORY_MINIWIN, "m_sampler");
+			SDL_LogError(LOG_CATEGORY_MINIWIN, "No sampler available for texture binding.");
 		}
 	}
 	else if (m_sampler) {
@@ -572,7 +582,7 @@ void Direct3DRMSDL3GPURenderer::SubmitDraw(
 		SDL_BindGPUFragmentSamplers(renderPass, 0, &samplerBinding, 1);
 	}
 	else {
-		SDL_LogError(LOG_CATEGORY_MINIWIN, "m_sampler2");
+		SDL_LogError(LOG_CATEGORY_MINIWIN, "No sampler available for texture binding.");
 	}
 
 	SDL_PushGPUVertexUniformData(cmdbuf, 0, &m_uniforms, sizeof(m_uniforms));
