@@ -200,7 +200,7 @@ Direct3DRMSDL3GPURenderer::Direct3DRMSDL3GPURenderer(
 	  m_transparentPipeline(transparentPipeline), m_transferTexture(transferTexture), m_depthTexture(depthTexture),
 	  m_downloadTransferBuffer(downloadTransferBuffer)
 {
-	SDL_GPUSamplerCreateInfo samplerInfo;
+	SDL_GPUSamplerCreateInfo samplerInfo = {};
 	samplerInfo.min_filter = SDL_GPU_FILTER_LINEAR;
 	samplerInfo.mag_filter = SDL_GPU_FILTER_LINEAR;
 	samplerInfo.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
@@ -232,6 +232,7 @@ Direct3DRMSDL3GPURenderer::Direct3DRMSDL3GPURenderer(
 
 Direct3DRMSDL3GPURenderer::~Direct3DRMSDL3GPURenderer()
 {
+    SDL_DestroySurface(m_renderedImage);
 	SDL_ReleaseGPUSampler(m_device, m_sampler);
 	SDL_ReleaseGPUBuffer(m_device, m_vertexBuffer);
 	SDL_ReleaseGPUTransferBuffer(m_device, m_downloadTransferBuffer);
