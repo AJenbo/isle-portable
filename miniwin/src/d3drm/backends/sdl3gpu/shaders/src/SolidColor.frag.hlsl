@@ -5,6 +5,7 @@ cbuffer FragmentShadingData : register(b0, space3)
 	SceneLight lights[3];
 	int lightCount;
 	float Shininess;
+	int UseTexture;
 	uint ColorRaw;
 }
 
@@ -18,12 +19,21 @@ float4 unpackColor(uint packed)
 	return color;
 }
 
+Texture2D<float4> Texture : register(t0, space2);
+SamplerState Sampler : register(s0, space2);
+
 FS_Output main(FS_Input input)
 {
 	FS_Output output;
 
 	float3 diffuse = float3(0, 0, 0);
 	float3 specular = float3(0, 0, 0);
+
+	float4 sampledColor = float4(1, 1, 1, 1);
+	if (UseTexture != 0) {
+		// sampledColor = float4(1,0,0,1);
+		sampledColor = Texture.Sample(Sampler, input.TexCoord);
+	}
 
 	for (int i = 0; i < lightCount; ++i) {
 		float3 lightColor = lights[i].color.rgb;
@@ -62,8 +72,11 @@ FS_Output main(FS_Input input)
 	}
 
 	float4 Color = unpackColor(ColorRaw);
-	float3 finalColor = saturate(diffuse * Color.rgb + specular);
-	output.Color = float4(finalColor, Color.a);
+
+	float3 finalColor = saturate(diffuse * Color.rgb * sampledColor.rgb + specular);
+
+	output.Color = float4(finalColor, Color.a * sampledColor.a);
+
 	output.Depth = input.Position.w;
 	return output;
 }
